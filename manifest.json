@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "GMN Image Captioner",
+  "version": "3.0",
+  "description": "Extremely powerful AI image captioner with advanced prompt engineering, context manipulation, and vision-scramble engines.",
+  "permissions": [
+    "contextMenus",
+    "storage",
+    "declarativeNetRequestWithHostAccess",
+    "clipboardRead"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["styles.css"]
+    }
+  ],
+  "icons": {
+    "128": "icon128.png"
+  },
+  "action": {
+    "default_icon": {
+      "128": "icon128.png"
+    }
+  }
+}
