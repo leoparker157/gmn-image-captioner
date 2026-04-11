@@ -82,8 +82,8 @@
   var selectedModel = GM_getValue('gic_model', DEFAULT_MODEL);
   var lastImg = null;
   var selectedImgSrc = null;
-  var imageList = GM_getValue('gic_image_list', []);
-  var currentImageIndex = GM_getValue('gic_current_index', 0);
+  var imageList = [];
+  var currentImageIndex = 0;
   var isMultiSelectEnabled = false;
 
   var selectedPageUrl = window.location.href;
@@ -181,15 +181,6 @@
     '#gic-prev{max-width:100%;max-height:140px;border-radius:10px;',
     'border:1px solid rgba(255,255,255,.08);margin-bottom:10px;display:none;',
     'object-fit:contain;background:rgba(0,0,0,.2);}',
-    
-    // Multi Image Carousel UI
-    '.gic-nav-btn { position:absolute; top:50%; transform:translateY(-50%); background:rgba(0,0,0,0.5); color:#fff; border:none; border-radius:50%; width:24px; height:24px; cursor:pointer; font-size:12px; display:flex; align-items:center; justify-content:center; z-index:10; transition:all 0.2s; }',
-    '.gic-nav-btn:hover { background:rgba(85,85,210,0.8); }',
-    '.gic-sm-btn { background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); border-radius:4px; color:#a0a0c0; font-size:11px; padding:4px 8px; cursor:pointer; transition:all 0.2s; }',
-    '.gic-sm-btn:hover { background:rgba(255,255,255,0.1); color:#fff; }',
-    '.gic-thumb { width:40px; height:40px; border-radius:4px; object-fit:cover; cursor:pointer; border:1px solid transparent; opacity:0.6; transition:all 0.2s; flex-shrink:0; }',
-    '.gic-thumb:hover { opacity:1; }',
-    '.gic-thumb.active { border-color:#8888ea; opacity:1; box-shadow:0 0 0 1px #8888ea; }',
 
     // Send button
     '#gic-send{width:100%;padding:10px;',
@@ -482,17 +473,26 @@
     // Body
     '<div id="gic-body">',
     '  <input type="file" id="gic-upload-input" accept="image/*" multiple style="display:none;">',
-    '  <div id="gic-multi-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">',
-    '    <div style="display:flex;gap:4px;">',
-    '      <span class="gic-lbl" style="margin:0;">Images</span>',
-    '      <button id="gic-clear-all" class="gic-sm-btn" style="padding:2px 6px;margin-left:4px;" title="Clear All Images">Clear</button>',
-    '    </div>',
-    '    <div style="display:flex;gap:8px;">',
-    '      <label style="font-size:11px;color:#a0a0c0;cursor:pointer;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="gic-keep-images" ' + (GM_getValue('gic_keep_images', false) ? 'checked' : '') + '> Keep Images</label>',
-    '      <label style="font-size:11px;color:#a0a0c0;cursor:pointer;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="gic-enable-multi" ' + (GM_getValue('gic_enable_multi', false) ? 'checked' : '') + '> Multiple Images</label>',
-    '    </div>',
+    '  <div id="gic-multi-header" style="display:none;align-items:center;justify-content:space-between;margin-bottom:8px;">',
+    '    <span class="gic-lbl" style="margin:0;">Images</span>',
+    '    <label style="font-size:11px;color:#a0a0c0;cursor:pointer;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="gic-enable-multi" ' + (GM_getValue('gic_enable_multi', false) ? 'checked' : '') + '> Multiple Images</label>',
     '  </div>',
-    '  <div id="gic-carousel" style="position:relative;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.2);border-radius:4px;overflow:hidden;margin-bottom:8px;">',
+    '  <div id="gic-carousel" style="position:relative;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.2);border-radius:4px;overflow:hidden;margin-bottom:8px;">',
+    '    <button id="gic-prev-btn" class="gic-nav-btn" style="left:4px;">◀</button>',
+    '    <img id="gic-prev">',
+    '    <button id="gic-next-btn" class="gic-nav-btn" style="right:4px;">▶</button>',
+    '    <div id="gic-img-counter" style="position:absolute;bottom:4px;right:6px;background:rgba(0,0,0,0.6);color:#fff;padding:2px 6px;border-radius:10px;font-size:10px;">1 / 1</div>',
+    '  </div>',
+    '  <div id="gic-multi-controls" style="display:none;justify-content:space-between;margin-bottom:8px;">',
+    '    <button id="gic-move-left" class="gic-sm-btn" title="Move Left">⬅</button>',
+    '    <button id="gic-remove-img" class="gic-sm-btn" style="color:#ff8b8b;" title="Remove this image">✖ Remove</button>',
+    '    <button id="gic-move-right" class="gic-sm-btn" title="Move Right">➡</button>',
+    '  </div>',
+    '  <div id="gic-thumbs" style="display:none;max-width:100%;overflow-x:auto;gap:4px;padding-bottom:6px;margin-bottom:8px;"></div-header" style="display:none;align-items:center;justify-content:space-between;margin-bottom:8px;">',
+    '    <span class="gic-lbl" style="margin:0;">Images</span>',
+    '    <label style="font-size:11px;color:#a0a0c0;cursor:pointer;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="gic-enable-multi" ' + (GM_getValue('gic_enable_multi', false) ? 'checked' : '') + '> Multiple Images</label>',
+    '  </div>',
+    '  <div id="gic-carousel" style="position:relative;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.2);border-radius:4px;overflow:hidden;margin-bottom:8px;">',
     '    <button id="gic-prev-btn" class="gic-nav-btn" style="left:4px;">◀</button>',
     '    <img id="gic-prev">',
     '    <button id="gic-next-btn" class="gic-nav-btn" style="right:4px;">▶</button>',
@@ -611,8 +611,6 @@
   // Multi-image refs
   var elMultiHeader = el('gic-multi-header');
   var elEnableMulti = el('gic-enable-multi');
-  var elKeepImages = el('gic-keep-images');
-  var elClearAll = el('gic-clear-all');
   var elCarousel = el('gic-carousel');
   var elPrevBtn = el('gic-prev-btn');
   var elNextBtn = el('gic-next-btn');
@@ -1233,7 +1231,7 @@ if (elJbSearch) {
     return true;
   }
 
-  function buildPayload(b64Array, prompt, mimeType, visionNotesArray) {
+  function buildPayload(b64, prompt, mimeType, visionNotes) {
     var payload = {
       contents: [],
       safetySettings: [
@@ -1269,31 +1267,12 @@ if (elJbSearch) {
     var tagOpen = isGemma ? '<|channel>thought\n' : '<think>\n';
     var tagClose = isGemma ? '\n<channel|>\n\n' : '\n</think>\n\n';
 
-    // Merge unique vision notes
-    var mergedNotes = [];
-    var noteKeyMap = {};
-    if (Array.isArray(visionNotesArray)) {
-      for (var vnIdx = 0; vnIdx < visionNotesArray.length; vnIdx++) {
-        var nts = visionNotesArray[vnIdx];
-        if (Array.isArray(nts)) {
-          for (var i = 0; i < nts.length; i++) {
-            var n = nts[i];
-            if (!n) continue;
-            var tn = typeof n === 'string' ? n : n.text;
-            if (!noteKeyMap[tn]) {
-              noteKeyMap[tn] = true;
-              mergedNotes.push(n);
-            }
-          }
-        }
-      }
-    }
-
-    var notes = mergedNotes;
+    var notes = Array.isArray(visionNotes) ? visionNotes : [];
     var notesForEncoding = [];
     var notesPlain = [];
     for (var n = 0; n < notes.length; n++) {
       var note = notes[n];
+      if (!note) continue;
       var text = typeof note === 'string' ? note : note.text;
       var type = typeof note === 'string' ? '' : (note.type || '');
       if (!text) continue;
@@ -1389,13 +1368,7 @@ if (elJbSearch) {
       }
 
       if (b.text) currentParts.push({ text: b.text });
-      if (b.image) {
-        if (Array.isArray(b64Array)) {
-          for (var imgIdx = 0; imgIdx < b64Array.length; imgIdx++) {
-            currentParts.push({ inline_data: { mime_type: mimeType || 'image/jpeg', data: b64Array[imgIdx] } });
-          }
-        }
-      }
+      if (b.image) currentParts.push({ inline_data: { mime_type: mimeType || 'image/jpeg', data: b64 } });
     }
     flush();
     
@@ -1417,7 +1390,7 @@ if (elJbSearch) {
     elRaw.textContent = title + '\n' + formatRawForDisplay(payload);
   }
 
-  function sendToGemini(b64Array, prompt, mimeType, visionNotesArray) {
+  function sendToGemini(b64, prompt, mimeType, visionNotes) {
     try {
       var key = elApiKey.value.trim() || apiKey;
       var model = elModel.value || selectedModel;
@@ -1429,7 +1402,7 @@ if (elJbSearch) {
       
       var payloadStr;
       try {
-        payloadStr = JSON.stringify(buildPayload(b64Array, prompt, mimeType, visionNotesArray));
+        payloadStr = JSON.stringify(buildPayload(b64, prompt, mimeType, visionNotes));
       } catch (payloadError) {
         elOut.textContent = 'Payload Build Error: ' + payloadError.message;
         return;
@@ -1497,7 +1470,7 @@ if (elJbSearch) {
     var prompt = elPrompt.value.trim();
     if (!prompt) { alert('Please enter a prompt.'); return; }
 
-    var payload = buildPayload(['[object]'], prompt, 'image/jpeg', [collectVisionNotes()]);
+    var payload = buildPayload('[object]', prompt, 'image/jpeg', collectVisionNotes());
     
     elResultArea.style.display = 'block';
     elPreviewArea.style.display = 'block';
@@ -1573,71 +1546,9 @@ if (elJbSearch) {
     } catch (e) { elOut.textContent = 'Error starting bypass: ' + e.message; }
   }
 
-  function applyVisionBypassesAsPromise(dataUrl) {
-    return new Promise(function(resolve, reject) {
-      applyVisionBypasses(dataUrl, function(b64, notes) {
-        resolve({ b64: b64, notes: notes });
-      });
-    });
-  }
-
-  function fetchImageAsB64(src) {
-    return new Promise(function (resolve, reject) {
-      if (src.startsWith('data:')) {
-        resolve(src);
-        return;
-      }
-      var fetchHandle = GM_xmlhttpRequest({
-        method: 'GET',
-        url: src,
-        responseType: 'blob',
-        headers: {
-          'Referer': selectedPageUrl || window.location.href,
-          'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
-        },
-        onload: function (r) {
-          var reader = new FileReader();
-          reader.onloadend = function () {
-            var dataUrl = reader.result;
-            var mime = dataUrl.substring(dataUrl.indexOf(':') + 1, dataUrl.indexOf(';'));
-            if (mime.indexOf('image/') !== 0) {
-              reject(new Error('Host returned a non-image file (' + mime + ')'));
-              return;
-            }
-            resolve(dataUrl);
-          };
-          reader.readAsDataURL(r.response);
-        },
-        onerror: function (err) {
-          var canvas = document.createElement('canvas');
-          var imgEl = new Image();
-          imgEl.crossOrigin = 'anonymous';
-          imgEl.onload = function () {
-            canvas.width = imgEl.naturalWidth;
-            canvas.height = imgEl.naturalHeight;
-            canvas.getContext('2d').drawImage(imgEl, 0, 0);
-            try {
-              resolve(canvas.toDataURL('image/jpeg'));
-            } catch (e) {
-              reject(new Error('CORS extraction failed for ' + src));
-            }
-          };
-          imgEl.onerror = function () {
-            reject(new Error('Failed to load image from: ' + src));
-          };
-          imgEl.src = src;
-        }
-      });
-      activeRequests.push(fetchHandle);
-    });
-  }
-
   // ── Send button ───────────────────────────────────────────────────────
   elSend.addEventListener('click', function () {
-    if (!imageList || imageList.length === 0) { 
-      alert('Select an image first by clicking the AI badge.'); 
-      return; 
-    }
+    if (!selectedImgSrc) { alert('Select an image first by clicking the AI badge.'); return; }
 
     var prompt = elPrompt.value.trim();
     if (!prompt) { alert('Please enter a prompt.'); return; }
@@ -1646,32 +1557,91 @@ if (elJbSearch) {
     elSend.innerHTML = '<span class="gic-spin"></span> Processing...';
     elCancel.style.display = 'block';
     elResultArea.style.display = 'block';
-    elOut.textContent = 'Fetching image(s)...';
+    elOut.textContent = 'Fetching image...';
     elRaw.style.display = 'none';
     activeRequests = [];
 
-    Promise.all(imageList.map(function(src) {
-      return fetchImageAsB64(src).then(function(b64) {
-        return applyVisionBypassesAsPromise(b64);
+    if (selectedImgSrc.startsWith('data:')) {
+      applyVisionBypasses(selectedImgSrc, function(newB64, visionNotes) {
+        sendToGemini(newB64, prompt, 'image/jpeg', visionNotes);
       });
-    }))
-    .then(function(results) {
-      var b64Array = [];
-      var visionNotesArray = [];
-      for (var i = 0; i < results.length; i++) {
-        b64Array.push(results[i].b64);
-        visionNotesArray.push(results[i].notes);
+      return;
+    }
+
+    var fetchHandle = GM_xmlhttpRequest({
+      method: 'GET',
+      url: selectedImgSrc,
+      responseType: 'blob',
+      headers: {
+        'Referer': selectedPageUrl || window.location.href,
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+      },
+      onload: function (r) {
+        try {
+          var reader = new FileReader();
+          reader.onloadend = function () {
+            try {
+              var dataUrl = reader.result;
+              var mime = dataUrl.substring(dataUrl.indexOf(':') + 1, dataUrl.indexOf(';'));
+              if (mime.indexOf('image/') !== 0) {
+                elOut.textContent = 'Fetch failed: Host returned a non-image file (' + mime + '). This usually happens due to hotlink protection or a broken link.';
+                elSend.disabled = false;
+                elSend.textContent = 'Send to Gemini';
+                elCancel.style.display = 'none';
+                return;
+              }
+              applyVisionBypasses(dataUrl, function(newB64, visionNotes) {
+                sendToGemini(newB64, prompt, 'image/jpeg', visionNotes);
+              });
+            } catch (e) {
+              elOut.textContent = 'Error in proxy onloadend: ' + e.message;
+            }
+          };
+          reader.readAsDataURL(r.response);
+        } catch (e) {
+          elOut.textContent = 'Error in proxy onload: ' + e.message;
+        }
+      },
+      onerror: function (err) {
+        // Canvas fallback
+        elOut.textContent = 'Direct fetch failed, trying canvas...';
+        var canvas = document.createElement('canvas');
+        var imgEl = new Image();
+        imgEl.crossOrigin = 'anonymous';
+        imgEl.onload = function () {
+          canvas.width = imgEl.naturalWidth;
+          canvas.height = imgEl.naturalHeight;
+          canvas.getContext('2d').drawImage(imgEl, 0, 0);
+          try {
+            var dataUrl = canvas.toDataURL('image/jpeg');
+            applyVisionBypasses(dataUrl, function(newB64, visionNotes) {
+              sendToGemini(newB64, prompt, 'image/jpeg', visionNotes);
+            });
+          } catch (e) {
+            elOut.textContent = 'Canvas error: ' + e.message;
+            elRaw.style.display = 'block';
+            elRaw.textContent = 'The image could not be extracted due to CORS restrictions.\nSource: ' + selectedImgSrc;
+            elSend.disabled = false;
+            elSend.textContent = 'Send to Gemini';
+          }
+        };
+        imgEl.onerror = function () {
+          elOut.textContent = 'Failed to load image from: ' + selectedImgSrc;
+          elRaw.style.display = 'block';
+          var errMsg = '';
+          if (err && typeof err === 'object') {
+            errMsg = err.responseText || err.message || '';
+          } else if (typeof err === 'string') {
+            errMsg = err;
+          }
+          elRaw.textContent = 'Both GM_xmlhttpRequest and canvas fallback failed.\nImage URL: ' + selectedImgSrc + '\nPage URL: ' + (selectedPageUrl || window.location.href) + (errMsg ? '\nProxy error: ' + errMsg : '');
+          elSend.disabled = false;
+          elSend.textContent = 'Send to Gemini';
+        };
+        imgEl.src = selectedImgSrc;
       }
-      sendToGemini(b64Array, prompt, 'image/jpeg', visionNotesArray);
-    })
-    .catch(function(err) {
-      elOut.textContent = 'Error processing images: ' + err.message;
-      elRaw.style.display = 'block';
-      elRaw.textContent = err.stack || err.message;
-      elSend.disabled = false;
-      elSend.textContent = 'Send to Gemini';
-      elCancel.style.display = 'none';
     });
+    if (fetchHandle) activeRequests.push(fetchHandle);
   });
 
   // ── Cancel button ─────────────────────────────────────────────────────
@@ -1715,82 +1685,7 @@ if (elJbSearch) {
     }
   });
 
-  function renderCarousel() {
-    var isMulti = elEnableMulti && elEnableMulti.checked;
-    
-    // Always show carousel container if there are images, so elPrev isn't hidden 
-    if (imageList.length > 0 || selectedImgSrc) {
-      if (elCarousel) elCarousel.style.display = 'flex';
-      
-      // Toggle complex multi-image UI
-      if (isMulti || imageList.length > 1) {
-        if (elMultiHeader) elMultiHeader.style.display = 'flex';
-        if (elMultiControls) elMultiControls.style.display = 'flex';
-        if (elPrevBtn) elPrevBtn.style.display = 'flex';
-        if (elNextBtn) elNextBtn.style.display = 'flex';
-        if (elImgCounter) {
-          elImgCounter.style.display = 'block';
-          elImgCounter.textContent = (currentImageIndex + 1) + ' / ' + imageList.length;
-        }
-        if (elThumbs) {
-          elThumbs.style.display = 'flex';
-          elThumbs.innerHTML = '';
-          imageList.forEach(function(imgSrc, idx) {
-            var img = document.createElement('img');
-            img.src = imgSrc;
-            img.className = 'gic-thumb';
-            if (idx === currentImageIndex) img.classList.add('active');
-            img.addEventListener('click', function() {
-              currentImageIndex = idx;
-              loadActiveImage(imageList[currentImageIndex], selectedPageUrl, true);
-            });
-            elThumbs.appendChild(img);
-          });
-        }
-      } else {
-        if (elMultiHeader) elMultiHeader.style.display = 'flex'; // allow toggling back to multiples!
-        if (elMultiControls) elMultiControls.style.display = 'none';
-        if (elPrevBtn) elPrevBtn.style.display = 'none';
-        if (elNextBtn) elNextBtn.style.display = 'none';
-        if (elImgCounter) elImgCounter.style.display = 'none';
-        if (elThumbs) elThumbs.style.display = 'none';
-      }
-    } else {
-      // Nothing loaded
-      if (elMultiHeader) elMultiHeader.style.display = 'none';
-      if (elCarousel) elCarousel.style.display = 'none';
-      if (elMultiControls) elMultiControls.style.display = 'none';
-      if (elThumbs) elThumbs.style.display = 'none';
-    }
-  }
-
-  function loadActiveImage(srcUrl, pageUrl = window.location.href, isFromThumb = false) {
-    if (!srcUrl) {
-      if (imageList.length > 0) {
-         srcUrl = imageList[currentImageIndex];
-      } else {
-         return; // Nothing to load
-      }
-    }
-    
-    if (!isFromThumb) {
-      var isMulti = elEnableMulti && elEnableMulti.checked;
-      if (isMulti) {
-        if (!imageList.includes(srcUrl)) {
-          imageList.push(srcUrl);
-        }
-        currentImageIndex = imageList.indexOf(srcUrl);
-      } else {
-        imageList = [srcUrl];
-        currentImageIndex = 0;
-      }
-    }
-    
-    if (elKeepImages && elKeepImages.checked) {
-      GM_setValue('gic_image_list', imageList);
-      GM_setValue('gic_current_index', currentImageIndex);
-    }
-
+  function loadActiveImage(srcUrl, pageUrl = window.location.href) {
     selectedImgSrc = srcUrl;
     selectedPageUrl = pageUrl;
     elPrev.src = selectedImgSrc || '';
@@ -1802,57 +1697,25 @@ if (elJbSearch) {
     elRaw.style.display = 'none';
     elOut.textContent = '';
     elRaw.textContent = '';
-
-    renderCarousel();
-  }
-
-  function sortFilesStable(files) {
-    return files.slice().sort(function(a, b) {
-      var an = (a && a.name) ? a.name : '';
-      var bn = (b && b.name) ? b.name : '';
-      var byName = an.localeCompare(bn, undefined, { numeric: true, sensitivity: 'base' });
-      if (byName !== 0) return byName;
-      var am = (a && typeof a.lastModified === 'number') ? a.lastModified : 0;
-      var bm = (b && typeof b.lastModified === 'number') ? b.lastModified : 0;
-      return am - bm;
-    });
-  }
-
-  function blobToDataUrl(blob) {
-    return new Promise(function(resolve, reject) {
-      var reader = new FileReader();
-      reader.onload = function(evt) { resolve(evt.target.result); };
-      reader.onerror = function() { reject(new Error('Failed to read image data.')); };
-      reader.readAsDataURL(blob);
-    });
-  }
-
-  async function addImagesInOrder(blobsOrFiles) {
-    if (!blobsOrFiles || !blobsOrFiles.length) return;
-    var sorted = sortFilesStable(blobsOrFiles);
-    var dataUrls = await Promise.all(sorted.map(blobToDataUrl));
-    for (var i = 0; i < dataUrls.length; i++) {
-      loadActiveImage(dataUrls[i]);
-    }
   }
 
   elPasteBtn.addEventListener('click', async function () {
     try {
       const clipboardItems = await navigator.clipboard.read();
-      var imageBlobs = [];
+      let foundImg = false;
       for (const item of clipboardItems) {
         for (const type of item.types) {
           if (type.startsWith('image/')) {
             const blob = await item.getType(type);
-            imageBlobs.push(blob);
+            const reader = new FileReader();
+            reader.onload = function(evt) { loadActiveImage(evt.target.result); };
+            reader.readAsDataURL(blob);
+            foundImg = true;
+            return; // stop after first image
           }
         }
       }
-      if (!imageBlobs.length) {
-        alert('No image found in clipboard.');
-        return;
-      }
-      await addImagesInOrder(imageBlobs);
+      if (!foundImg) alert('No image found in clipboard.');
     } catch (err) {
       alert('Could not read clipboard. Ensure you granted permission to read it.');
       console.error(err);
@@ -1860,144 +1723,32 @@ if (elJbSearch) {
   });
 
   elUploadBtn.addEventListener('click', function () { elUploadInput.click(); });
-  elUploadInput.addEventListener('change', async function (e) {
-    var files = e.target.files;
-    if (!files || !files.length) return;
-    try {
-      await addImagesInOrder(Array.from(files).filter(function(file) { return file.type && file.type.startsWith('image/'); }));
-    } catch (err) {
-      console.error(err);
-      alert('Failed to load one or more selected images.');
-    } finally {
-      elUploadInput.value = '';
-    }
+  elUploadInput.addEventListener('change', function (e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(evt) { loadActiveImage(evt.target.result); };
+    reader.readAsDataURL(file);
+    elUploadInput.value = '';
   });
 
   box.addEventListener('dragover', function (e) { e.preventDefault(); });
-  box.addEventListener('drop', async function (e) {
+  box.addEventListener('drop', function (e) {
     e.preventDefault();
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      try {
-        await addImagesInOrder(Array.from(e.dataTransfer.files).filter(function(file) { return file.type && file.type.startsWith('image/'); }));
-      } catch (err) {
-        console.error(err);
-        alert('Failed to load one or more dropped images.');
+      var file = e.dataTransfer.files[0];
+      if (file.type.startsWith('image/')) {
+        var reader = new FileReader();
+        reader.onload = function(evt) { loadActiveImage(evt.target.result); };
+        reader.readAsDataURL(file);
       }
     }
   });
 
-  if (elEnableMulti) {
-    elEnableMulti.addEventListener('change', function() {
-      GM_setValue('gic_enable_multi', elEnableMulti.checked);
-      if (!elEnableMulti.checked && imageList.length > 0) {
-        imageList = [imageList[currentImageIndex]];
-        currentImageIndex = 0;
-      }
-      renderCarousel();
-    });
-  }
-  if (elPrevBtn) {
-    elPrevBtn.addEventListener('click', function() {
-      if (imageList.length > 0) {
-        currentImageIndex = (currentImageIndex - 1 + imageList.length) % imageList.length;
-        loadActiveImage(imageList[currentImageIndex], selectedPageUrl, true);
-      }
-    });
-  }
-  if (elNextBtn) {
-    elNextBtn.addEventListener('click', function() {
-      if (imageList.length > 0) {
-        currentImageIndex = (currentImageIndex + 1) % imageList.length;
-        loadActiveImage(imageList[currentImageIndex], selectedPageUrl, true);
-      }
-    });
-  }
-  function updateSavedImageList() {
-    if (elKeepImages && elKeepImages.checked) {
-      GM_setValue('gic_image_list', imageList);
-      GM_setValue('gic_current_index', currentImageIndex);
-    }
-  }
-
-  if (elClearAll) {
-    elClearAll.addEventListener('click', function() {
-      imageList = [];
-      currentImageIndex = 0;
-      selectedImgSrc = null;
-      elPrev.src = '';
-      elPrev.style.display = 'none';
-      box.style.display = 'none';
-      updateSavedImageList();
-      renderCarousel();
-    });
-  }
-
-  if (elKeepImages) {
-    elKeepImages.addEventListener('change', function() {
-      GM_setValue('gic_keep_images', elKeepImages.checked);
-      if (elKeepImages.checked) {
-        updateSavedImageList();
-      } else {
-        GM_setValue('gic_image_list', []);
-        GM_setValue('gic_current_index', 0);
-      }
-    });
-  }
-
-  if (elMoveLeft) {
-    elMoveLeft.addEventListener('click', function() {
-      if (imageList.length > 1 && currentImageIndex > 0) {
-        var temp = imageList[currentImageIndex - 1];
-        imageList[currentImageIndex - 1] = imageList[currentImageIndex];
-        imageList[currentImageIndex] = temp;
-        currentImageIndex--;
-        updateSavedImageList();
-        renderCarousel();
-      }
-    });
-  }
-  if (elMoveRight) {
-    elMoveRight.addEventListener('click', function() {
-      if (imageList.length > 1 && currentImageIndex < imageList.length - 1) {
-        var temp = imageList[currentImageIndex + 1];
-        imageList[currentImageIndex + 1] = imageList[currentImageIndex];
-        imageList[currentImageIndex] = temp;
-        currentImageIndex++;
-        updateSavedImageList();
-        renderCarousel();
-      }
-    });
-  }
-  if (elRemoveImg) {
-    elRemoveImg.addEventListener('click', function() {
-      if (imageList.length > 0) {
-        imageList.splice(currentImageIndex, 1);
-        if (imageList.length === 0) {
-          selectedImgSrc = null;
-          elPrev.src = '';
-          elPrev.style.display = 'none';
-          currentImageIndex = 0;
-          box.style.display = 'none';
-        } else {
-          currentImageIndex = Math.min(currentImageIndex, imageList.length - 1);
-          loadActiveImage(imageList[currentImageIndex], selectedPageUrl, true);
-        }
-        updateSavedImageList();
-        renderCarousel();
-      }
-    });
-  }
-
-  // Trigger from extension background.js Context Menu & Icon
+  // Trigger from extension background.js Context Menu
   chrome.runtime.onMessage.addListener((req) => {
       if (req.action === "context_menu_clicked") {
           loadActiveImage(req.srcUrl, req.pageUrl);
-      } else if (req.action === "open_ui") {
-          if (imageList && imageList.length > 0) {
-             loadActiveImage(imageList[currentImageIndex], window.location.href, true);
-          } else {
-             box.style.display = 'flex';
-          }
       }
   });
 

@@ -11,6 +11,12 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
+chrome.action.onClicked.addListener((tab) => {
+  chrome.tabs.sendMessage(tab.id, {
+    action: "open_ui"
+  });
+});
+
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === MENU_ID) {
     chrome.tabs.sendMessage(tab.id, {
