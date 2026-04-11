@@ -7,21 +7,16 @@
     "contextMenus",
     "storage",
     "declarativeNetRequestWithHostAccess",
-    "clipboardRead"
+    "clipboardRead",
+    "activeTab",
+    "scripting"
   ],
   "host_permissions": [
-    "<all_urls>"
+    "https://generativelanguage.googleapis.com/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
-      "css": ["styles.css"]
-    }
-  ],
   "icons": {
     "128": "icon128.png"
   },

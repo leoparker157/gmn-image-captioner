@@ -11,14 +11,35 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-chrome.action.onClicked.addListener((tab) => {
+async function ensureInjected(tabId) {
+  try {
+    // Try to ping the tab with a short timeout.
+    const pingPromise = chrome.tabs.sendMessage(tabId, { action: "ping" });
+    const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 300));
+    await Promise.race([pingPromise, timeoutPromise]);
+  } catch (err) {
+    // Connection failed or timed out, inject scripts
+    await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      files: ["content.js"]
+    });
+    await chrome.scripting.insertCSS({
+      target: { tabId: tabId },
+      files: ["styles.css"]
+    });
+  }
+}
+
+chrome.action.onClicked.addListener(async (tab) => {
+  await ensureInjected(tab.id);
   chrome.tabs.sendMessage(tab.id, {
     action: "open_ui"
   });
 });
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === MENU_ID) {
+    await ensureInjected(tab.id);
     chrome.tabs.sendMessage(tab.id, {
       action: "context_menu_clicked",
       srcUrl: info.srcUrl,

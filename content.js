@@ -1,5 +1,10 @@
 // Gemini Image Captioner - Content Script
 // Auto-generated to match Tampermonkey script logic exactly.
+if (window.GMN_IMAGE_CAPTIONER_LOADED) {
+    console.log('[GMN Image Captioner] Already loaded.');
+} else {
+    window.GMN_IMAGE_CAPTIONER_LOADED = true;
+
 (async function() {
   'use strict';
 
@@ -1989,7 +1994,7 @@ if (elJbSearch) {
   }
 
   // Trigger from extension background.js Context Menu & Icon
-  chrome.runtime.onMessage.addListener((req) => {
+  chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
       if (req.action === "context_menu_clicked") {
           loadActiveImage(req.srcUrl, req.pageUrl);
       } else if (req.action === "open_ui") {
@@ -1998,10 +2003,12 @@ if (elJbSearch) {
           } else {
              box.style.display = 'flex';
           }
+      } else if (req.action === "ping") {
+          sendResponse(true);
       }
   });
 
-  console.log('[GMN Image Captioner] v2.1 Loaded');
+  console.log('[GMN Image Captioner] v3.3 Loaded');
+  })();
 })();
-
-})();
+}
