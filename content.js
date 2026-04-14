@@ -93,6 +93,148 @@ if (window.GMN_IMAGE_CAPTIONER_LOADED) {
 
   var selectedPageUrl = window.location.href;
   var activeRequests = [];
+  var IMAGE_CACHE_KEY = 'gic_image_cache_v1';
+  var IMAGE_CACHE_MAX_ITEMS = 20;
+  var IMAGE_CACHE_MAX_TOTAL_CHARS = 4 * 1024 * 1024;
+  var IMAGE_CACHE_MAX_ENTRY_CHARS = 1200 * 1024;
+  var GEMINI_IMAGE_TARGET_MAX_BYTES = 7 * 1024 * 1024;
+  var imageDataCache = normalizeImageCache(GM_getValue(IMAGE_CACHE_KEY, {}));
+
+  function normalizeImageCache(raw) {
+    if (!raw || typeof raw !== 'object') return {};
+    var out = {};
+    var keys = Object.keys(raw);
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      var entry = raw[key];
+      if (typeof entry === 'string' && entry.indexOf('data:image/') === 0) {
+        out[key] = { dataUrl: entry, ts: Date.now() };
+      } else if (entry && typeof entry === 'object' && typeof entry.dataUrl === 'string' && entry.dataUrl.indexOf('data:image/') === 0) {
+        out[key] = { dataUrl: entry.dataUrl, ts: typeof entry.ts === 'number' ? entry.ts : Date.now() };
+      }
+    }
+    return out;
+  }
+
+  function estimateDataUrlBytes(dataUrl) {
+    if (!dataUrl || dataUrl.indexOf(',') < 0) return 0;
+    var base64 = dataUrl.split(',')[1] || '';
+    var padding = 0;
+    if (base64.endsWith('==')) padding = 2;
+    else if (base64.endsWith('=')) padding = 1;
+    return Math.floor((base64.length * 3) / 4) - padding;
+  }
+
+  function pruneImageCache(cacheObj) {
+    var keys = Object.keys(cacheObj || {});
+    var entries = [];
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      var item = cacheObj[key];
+      if (!item || typeof item.dataUrl !== 'string') continue;
+      entries.push({ key: key, dataUrl: item.dataUrl, ts: item.ts || 0, size: item.dataUrl.length + key.length });
+    }
+
+    entries.sort(function(a, b) { return b.ts - a.ts; });
+
+    var pruned = {};
+    var totalChars = 0;
+    var kept = 0;
+    for (var j = 0; j < entries.length; j++) {
+      var it = entries[j];
+      if (kept >= IMAGE_CACHE_MAX_ITEMS) continue;
+      if (it.dataUrl.length > IMAGE_CACHE_MAX_ENTRY_CHARS) continue;
+      if (totalChars + it.size > IMAGE_CACHE_MAX_TOTAL_CHARS) continue;
+      pruned[it.key] = { dataUrl: it.dataUrl, ts: it.ts || Date.now() };
+      totalChars += it.size;
+      kept++;
+    }
+    return pruned;
+  }
+
+  function persistImageCache() {
+    imageDataCache = pruneImageCache(imageDataCache);
+    GM_storage[IMAGE_CACHE_KEY] = imageDataCache;
+    chrome.storage.local.set({ gic_image_cache_v1: imageDataCache }, function() {
+      if (chrome.runtime.lastError) {
+        console.warn('[GMN Image Captioner] Failed to persist image cache:', chrome.runtime.lastError.message);
+      }
+    });
+  }
+
+  function isHttpImageSource(src) {
+    return typeof src === 'string' && (src.indexOf('http://') === 0 || src.indexOf('https://') === 0);
+  }
+
+  function getCachedImageDataUrl(src) {
+    if (!isHttpImageSource(src)) return null;
+    var entry = imageDataCache[src];
+    if (!entry || typeof entry.dataUrl !== 'string') return null;
+    entry.ts = Date.now();
+    return entry.dataUrl;
+  }
+
+  function cacheImageDataUrl(src, dataUrl) {
+    if (!isHttpImageSource(src)) return;
+    if (!dataUrl || dataUrl.indexOf('data:image/') !== 0) return;
+    if (dataUrl.length > IMAGE_CACHE_MAX_ENTRY_CHARS) return;
+    imageDataCache[src] = { dataUrl: dataUrl, ts: Date.now() };
+    persistImageCache();
+  }
+
+  function normalizeImageDataUrlForGemini(dataUrl) {
+    return new Promise(function(resolve) {
+      if (!dataUrl || dataUrl.indexOf('data:image/') !== 0) {
+        resolve(dataUrl);
+        return;
+      }
+
+      if (estimateDataUrlBytes(dataUrl) <= GEMINI_IMAGE_TARGET_MAX_BYTES) {
+        resolve(dataUrl);
+        return;
+      }
+
+      var img = new Image();
+      img.onload = function() {
+        try {
+          var width = img.naturalWidth || 0;
+          var height = img.naturalHeight || 0;
+          if (!width || !height) {
+            resolve(dataUrl);
+            return;
+          }
+
+          var maxDim = 2200;
+          if (width > maxDim || height > maxDim) {
+            var scale = Math.min(maxDim / width, maxDim / height);
+            width = Math.max(1, Math.round(width * scale));
+            height = Math.max(1, Math.round(height * scale));
+          }
+
+          var canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          var ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+
+          var qualities = [0.90, 0.82, 0.74, 0.66, 0.58, 0.50];
+          var candidate = dataUrl;
+          for (var i = 0; i < qualities.length; i++) {
+            candidate = canvas.toDataURL('image/jpeg', qualities[i]);
+            if (estimateDataUrlBytes(candidate) <= GEMINI_IMAGE_TARGET_MAX_BYTES) {
+              resolve(candidate);
+              return;
+            }
+          }
+          resolve(candidate);
+        } catch (_) {
+          resolve(dataUrl);
+        }
+      };
+      img.onerror = function() { resolve(dataUrl); };
+      img.src = dataUrl;
+    });
+  }
 
   // All Gemini models (grouped)
   var MODEL_GROUPS = [
@@ -144,12 +286,12 @@ if (window.GMN_IMAGE_CAPTIONER_LOADED) {
     '#gic-close-btn:hover{background:rgba(255,80,80,.25);color:#ff6b6b;}',
 
     // Content wrapper
-    '#gic-content{flex:1;overflow-y:auto;display:flex;flex-direction:column;}',
+    '#gic-content{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;overscroll-behavior:contain;}',
     '#gic-content::-webkit-scrollbar{width:5px;}',
     '#gic-content::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:3px;}',
 
     // Body
-    '#gic-body{padding:14px 18px;flex:1;}',
+    '#gic-body{padding:14px 18px;flex:0 0 auto;min-height:0;}',
 
     // Settings panel (toggle)
     '#gic-settings{display:none;padding:14px 18px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0;}',
@@ -220,11 +362,16 @@ if (window.GMN_IMAGE_CAPTIONER_LOADED) {
     'background:rgba(0,0,0,.2);border-radius:10px;border:1px solid rgba(255,255,255,.06);}',
     '#gic-out::-webkit-scrollbar{width:5px;}',
     '#gic-out::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:3px;}',
-    '#gic-preview-out{margin-top:8px;font-size:11px;max-height:200px;overflow-y:auto;user-select:text;white-space:pre-wrap;word-break:break-word;line-height:1.45;padding:10px;cursor:text;',
+    '#gic-preview-out{margin-top:8px;font-size:11px;max-height:220px;overflow-y:auto;user-select:text;white-space:pre-wrap;word-break:break-word;line-height:1.5;padding:10px 10px 10px 6px;cursor:text;tab-size:2;text-align:left;',
     'background:rgba(0,0,0,.18);border-radius:10px;border:1px solid rgba(255,255,255,.08);',
     'font-family:Consolas,Menlo,Monaco,monospace;color:#cfe0ff;}',
     '#gic-preview-out::-webkit-scrollbar{width:5px;}',
     '#gic-preview-out::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:3px;}',
+    '.gic-json-key{color:#8ec5ff;}',
+    '.gic-json-string{color:#a5d6a7;}',
+    '.gic-json-number{color:#ffd166;}',
+    '.gic-json-boolean{color:#ff9f9f;}',
+    '.gic-json-null{color:#b39ddb;}',
 
     // Error raw output
     '#gic-raw{margin-top:8px;font-size:11px;max-height:150px;overflow-y:auto;',
@@ -435,7 +582,10 @@ if (window.GMN_IMAGE_CAPTIONER_LOADED) {
     '  <div class="gic-divider"></div>',
     '  <div class="gic-section-title" style="display:flex;justify-content:space-between;align-items:center;">',
     '    <span>🧱 Payload Sequence</span>',
-    '    <button class="gic-rst-btn" id="gic-rst-seq">Reset Order</button>',
+    '    <div style="display:flex;gap:8px;align-items:center;">',
+    '      <button class="gic-rst-btn" id="gic-preview-inline">Preview JSON</button>',
+    '      <button class="gic-rst-btn" id="gic-rst-seq">Reset Order</button>',
+    '    </div>',
     '  </div>',
     '  <div style="font-size:10px;color:#7a7a9e;margin-bottom:8px;">Drag and drop to re-order the JSON payload logic.</div>',
     '  <div id="gic-seq-list" style="display:flex;flex-direction:column;gap:4px;margin-bottom:12px;"></div>',
@@ -598,6 +748,7 @@ if (window.GMN_IMAGE_CAPTIONER_LOADED) {
   var elPrompt = el('gic-prompt');
   var elSend = el('gic-send');
   var elPreview = el('gic-preview');
+  var elPreviewInline = el('gic-preview-inline');
   var elPreviewArea = el('gic-preview-area');
   var elPreviewOut = el('gic-preview-out');
   var elOut = el('gic-out');
@@ -706,6 +857,25 @@ if (window.GMN_IMAGE_CAPTIONER_LOADED) {
   var elPresetMsg = el('gic-preset-msg');
   var PRESET_STORAGE_KEY = 'gic_presets_v1';
   var PRESET_ACTIVE_KEY = 'gic_active_preset';
+
+  if (elPrev) {
+    elPrev.addEventListener('load', function() {
+      if (!selectedImgSrc || !isHttpImageSource(selectedImgSrc)) return;
+      if (getCachedImageDataUrl(selectedImgSrc)) return;
+      try {
+        var canvas = document.createElement('canvas');
+        canvas.width = elPrev.naturalWidth || elPrev.width;
+        canvas.height = elPrev.naturalHeight || elPrev.height;
+        if (!canvas.width || !canvas.height) return;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(elPrev, 0, 0);
+        var extracted = canvas.toDataURL('image/jpeg', 0.90);
+        cacheImageDataUrl(selectedImgSrc, extracted);
+      } catch (_) {
+        // Ignore tainted canvas or extraction failures.
+      }
+    });
+  }
 
   function save(k, v) { GM_setValue(k, v); }
 
@@ -1422,6 +1592,28 @@ if (elJbSearch) {
     elRaw.textContent = title + '\n' + formatRawForDisplay(payload);
   }
 
+  function escapeHtml(text) {
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function syntaxHighlightJson(jsonText) {
+    var escaped = escapeHtml(jsonText);
+    return escaped.replace(/("(\\u[0-9a-fA-F]{4}|\\[^u]|[^\\"])*"\s*:?)|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?/g, function (match) {
+      var cls = 'gic-json-number';
+      if (match.charAt(0) === '"') {
+        cls = /:$/.test(match) ? 'gic-json-key' : 'gic-json-string';
+      } else if (match === 'true' || match === 'false') {
+        cls = 'gic-json-boolean';
+      } else if (match === 'null') {
+        cls = 'gic-json-null';
+      }
+      return '<span class="' + cls + '">' + match + '</span>';
+    });
+  }
+
   function sendToGemini(b64Array, prompt, mimeType, visionNotesArray) {
     try {
       var key = elApiKey.value.trim() || apiKey;
@@ -1497,18 +1689,22 @@ if (elJbSearch) {
     }
   }
 
-  // ── Preview Payload Button ────────────────────────────────────────────
-  elPreview.addEventListener('click', function () {
+  function showPayloadPreview() {
     var prompt = elPrompt.value.trim();
     if (!prompt) { alert('Please enter a prompt.'); return; }
 
     var payload = buildPayload(['[object]'], prompt, 'image/jpeg', [collectVisionNotes()]);
+    var prettyPayload = JSON.stringify(payload, null, 2);
     
     elResultArea.style.display = 'block';
     elPreviewArea.style.display = 'block';
-    elPreviewOut.textContent = JSON.stringify(payload, null, 2);
+    elPreviewOut.innerHTML = syntaxHighlightJson(prettyPayload);
     elRaw.style.display = 'none';
-  });
+  }
+
+  // ── Preview Payload Buttons ───────────────────────────────────────────
+  if (elPreview) elPreview.addEventListener('click', showPayloadPreview);
+  if (elPreviewInline) elPreviewInline.addEventListener('click', showPayloadPreview);
 
   // ── Canvas Vision Processing ───────────────────────────────────────────
   function applyVisionBypasses(dataUrl, callback) {
@@ -1571,7 +1767,10 @@ if (elJbSearch) {
         ctx.putImageData(idata, 0, 0);
       }
 
-      callback(c.toDataURL('image/jpeg', 0.95).split(',')[1], collectVisionNotes());
+      var transformedDataUrl = c.toDataURL('image/jpeg', 0.95);
+      normalizeImageDataUrlForGemini(transformedDataUrl).then(function(preparedDataUrl) {
+        callback(preparedDataUrl.split(',')[1], collectVisionNotes());
+      });
       } catch (e) { elOut.textContent = 'Error in Vision Bypass: ' + e.message; }
     };
     img.src = dataUrl;
@@ -1586,12 +1785,43 @@ if (elJbSearch) {
     });
   }
 
+  function fetchImageViaContentContext(src) {
+    return fetch(src, {
+      method: 'GET',
+      credentials: 'include',
+      cache: 'no-cache',
+      redirect: 'follow',
+      referrer: selectedPageUrl || window.location.href,
+      referrerPolicy: 'strict-origin-when-cross-origin',
+      headers: {
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+      }
+    }).then(function(response) {
+      if (!response || !response.ok) {
+        throw new Error('Direct fetch failed: HTTP ' + (response ? response.status : '?'));
+      }
+      return response.blob();
+    }).then(function(blob) {
+      if (!blob || !blob.type || blob.type.indexOf('image/') !== 0) {
+        throw new Error('Direct fetch returned non-image payload');
+      }
+      return blobToDataUrl(blob);
+    });
+  }
+
   function fetchImageAsB64(src) {
     return new Promise(function (resolve, reject) {
       if (src.startsWith('data:')) {
-        resolve(src);
+        normalizeImageDataUrlForGemini(src).then(resolve);
         return;
       }
+
+      var cachedDataUrl = getCachedImageDataUrl(src);
+      if (cachedDataUrl) {
+        normalizeImageDataUrlForGemini(cachedDataUrl).then(resolve);
+        return;
+      }
+
       var fetchHandle = GM_xmlhttpRequest({
         method: 'GET',
         url: src,
@@ -1609,11 +1839,20 @@ if (elJbSearch) {
               reject(new Error('Host returned a non-image file (' + mime + ')'));
               return;
             }
-            resolve(dataUrl);
+            normalizeImageDataUrlForGemini(dataUrl).then(function(preparedDataUrl) {
+              cacheImageDataUrl(src, preparedDataUrl);
+              resolve(preparedDataUrl);
+            });
           };
           reader.readAsDataURL(r.response);
         },
         onerror: function (err) {
+          fetchImageViaContentContext(src).then(function(contentFetchedDataUrl) {
+            return normalizeImageDataUrlForGemini(contentFetchedDataUrl).then(function(preparedDataUrl) {
+              cacheImageDataUrl(src, preparedDataUrl);
+              resolve(preparedDataUrl);
+            });
+          }).catch(function() {
           var canvas = document.createElement('canvas');
           var imgEl = new Image();
           imgEl.crossOrigin = 'anonymous';
@@ -1622,15 +1861,20 @@ if (elJbSearch) {
             canvas.height = imgEl.naturalHeight;
             canvas.getContext('2d').drawImage(imgEl, 0, 0);
             try {
-              resolve(canvas.toDataURL('image/jpeg'));
+              var dataUrl = canvas.toDataURL('image/jpeg');
+              normalizeImageDataUrlForGemini(dataUrl).then(function(preparedDataUrl) {
+                cacheImageDataUrl(src, preparedDataUrl);
+                resolve(preparedDataUrl);
+              });
             } catch (e) {
-              reject(new Error('CORS extraction failed for ' + src));
+              reject(new Error('CORS extraction failed for ' + src + '. Open the image from the manga page once, then retry so cache can be used.'));
             }
           };
           imgEl.onerror = function () {
             reject(new Error('Failed to load image from: ' + src));
           };
           imgEl.src = src;
+          });
         }
       });
       activeRequests.push(fetchHandle);
@@ -1798,7 +2042,8 @@ if (elJbSearch) {
 
     selectedImgSrc = srcUrl;
     selectedPageUrl = pageUrl;
-    elPrev.src = selectedImgSrc || '';
+    var previewSrc = getCachedImageDataUrl(selectedImgSrc) || selectedImgSrc;
+    elPrev.src = previewSrc || '';
     elPrev.style.display = selectedImgSrc ? 'block' : 'none';
     box.style.display = 'flex';
     elResultArea.style.display = 'none';

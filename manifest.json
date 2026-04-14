@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GMN Image Captioner",
-  "version": "3.0",
+  "version": "3.0.1",
   "description": "Extremely powerful AI image captioner with advanced prompt engineering, context manipulation, and vision-scramble engines.",
   "permissions": [
     "contextMenus",
@@ -10,6 +10,10 @@
     "clipboardRead",
     "activeTab",
     "scripting"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
   ],
   "host_permissions": [
     "https://generativelanguage.googleapis.com/*"

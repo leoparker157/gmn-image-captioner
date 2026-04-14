@@ -3,6 +3,56 @@
 
 const MENU_ID = "gic-caption-image";
 
+function toOriginPattern(rawUrl) {
+  if (!rawUrl) return null;
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return `${u.origin}/*`;
+  } catch (_) {
+    return null;
+  }
+}
+
+function containsOrigins(origins) {
+  return new Promise((resolve) => {
+    chrome.permissions.contains({ origins }, (granted) => {
+      resolve(Boolean(granted) && !chrome.runtime.lastError);
+    });
+  });
+}
+
+function requestOrigins(origins) {
+  return new Promise((resolve) => {
+    chrome.permissions.request({ origins }, (granted) => {
+      resolve(Boolean(granted) && !chrome.runtime.lastError);
+    });
+  });
+}
+
+async function ensureHostAccessForUrls(urls, interactive) {
+  const patterns = Array.from(new Set((urls || [])
+    .map(toOriginPattern)
+    .filter(Boolean)));
+
+  if (!patterns.length) return true;
+
+  // Request immediately inside user-gesture handlers to avoid losing gesture
+  // through async permission checks.
+  if (interactive) {
+    return requestOrigins(patterns);
+  }
+
+  const missing = [];
+  for (const pattern of patterns) {
+    const has = await containsOrigins([pattern]);
+    if (!has) missing.push(pattern);
+  }
+
+  if (!missing.length) return true;
+  return false;
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: MENU_ID,
@@ -31,6 +81,7 @@ async function ensureInjected(tabId) {
 }
 
 chrome.action.onClicked.addListener(async (tab) => {
+  await ensureHostAccessForUrls([tab?.url], true);
   await ensureInjected(tab.id);
   chrome.tabs.sendMessage(tab.id, {
     action: "open_ui"
@@ -39,6 +90,7 @@ chrome.action.onClicked.addListener(async (tab) => {
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === MENU_ID) {
+    await ensureHostAccessForUrls([info?.srcUrl, info?.pageUrl || tab?.url], true);
     await ensureInjected(tab.id);
     chrome.tabs.sendMessage(tab.id, {
       action: "context_menu_clicked",
@@ -146,6 +198,15 @@ async function fetchWithTemporaryRefererRule(url, referer, fetchOptions) {
 }
 
 async function handleProxyFetch(request, sender, sendResponse) {
+  const hasAccess = await ensureHostAccessForUrls([request.url], false);
+  if (!hasAccess) {
+    sendResponse({
+      success: false,
+      error: 'No host permission for image origin. Right-click the image and select "Caption with GMN" to grant access for this site.'
+    });
+    return;
+  }
+
   const referer = request.referer || sender?.url || "";
   const accept = request.accept || "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
   const refererCandidates = buildRefererCandidates(request.url, referer);
