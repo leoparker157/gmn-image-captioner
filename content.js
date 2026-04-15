@@ -93,11 +93,13 @@ if (window.GMN_IMAGE_CAPTIONER_LOADED) {
 
   var selectedPageUrl = window.location.href;
   var activeRequests = [];
+  var cancelRequested = false;
   var IMAGE_CACHE_KEY = 'gic_image_cache_v1';
   var IMAGE_CACHE_MAX_ITEMS = 20;
   var IMAGE_CACHE_MAX_TOTAL_CHARS = 4 * 1024 * 1024;
   var IMAGE_CACHE_MAX_ENTRY_CHARS = 1200 * 1024;
   var GEMINI_IMAGE_TARGET_MAX_BYTES = 7 * 1024 * 1024;
+  var RUNTIME_MESSAGE_SAFE_MAX_BYTES = 58 * 1024 * 1024;
   var imageDataCache = normalizeImageCache(GM_getValue(IMAGE_CACHE_KEY, {}));
 
   function normalizeImageCache(raw) {
@@ -123,6 +125,14 @@ if (window.GMN_IMAGE_CAPTIONER_LOADED) {
     if (base64.endsWith('==')) padding = 2;
     else if (base64.endsWith('=')) padding = 1;
     return Math.floor((base64.length * 3) / 4) - padding;
+  }
+
+  function estimateUtf8Bytes(text) {
+    if (!text) return 0;
+    if (typeof TextEncoder !== 'undefined') {
+      return new TextEncoder().encode(text).length;
+    }
+    return unescape(encodeURIComponent(text)).length;
   }
 
   function pruneImageCache(cacheObj) {
@@ -1614,7 +1624,255 @@ if (elJbSearch) {
     });
   }
 
-  function sendToGemini(b64Array, prompt, mimeType, visionNotesArray) {
+  function parseGeminiResponse(rawText) {
+    var parsed;
+    try {
+      parsed = JSON.parse(rawText || '{}');
+    } catch (e) {
+      return {
+        ok: false,
+        displayText: 'Parse error: ' + e.message,
+        rawTitle: 'RAW RESPONSE:',
+        rawValue: rawText || '(empty response)'
+      };
+    }
+
+    if (parsed.error) {
+      return {
+        ok: false,
+        displayText: 'API Error (' + (parsed.error.code || '?') + '): ' + (parsed.error.message || 'Unknown error'),
+        rawTitle: 'RAW RESPONSE:',
+        rawValue: parsed
+      };
+    }
+
+    if (parsed.candidates && parsed.candidates.length > 0) {
+      var c0 = parsed.candidates[0] || {};
+      var parts = (c0.content && c0.content.parts) ? c0.content.parts : [];
+      var text = '';
+      for (var i = 0; i < parts.length; i++) {
+        if (parts[i].text) text += parts[i].text;
+      }
+
+      if (text) {
+        if (c0.finishReason && c0.finishReason !== 'STOP') {
+          text += '\n\n[Finish Reason: ' + c0.finishReason + ']';
+        }
+        return {
+          ok: true,
+          displayText: text,
+          rawTitle: null,
+          rawValue: null
+        };
+      }
+
+      if (c0.finishReason) {
+        return {
+          ok: false,
+          displayText: 'Blocked: ' + c0.finishReason + (c0.finishMessage ? '\n' + c0.finishMessage : ''),
+          rawTitle: 'RAW RESPONSE:',
+          rawValue: parsed
+        };
+      }
+
+      return {
+        ok: false,
+        displayText: '(empty text in response)',
+        rawTitle: 'RAW RESPONSE:',
+        rawValue: parsed
+      };
+    }
+
+    return {
+      ok: false,
+      displayText: 'Unexpected response format.',
+      rawTitle: 'RAW RESPONSE:',
+      rawValue: parsed
+    };
+  }
+
+  function splitPayloadIntoBatches(b64Array, prompt, mimeType, visionNotesArray) {
+    var batches = [];
+    var currentB64 = [];
+    var currentNotes = [];
+
+    for (var i = 0; i < b64Array.length; i++) {
+      var candidateB64 = currentB64.concat([b64Array[i]]);
+      var candidateNotes = currentNotes.concat([visionNotesArray && visionNotesArray[i] ? visionNotesArray[i] : []]);
+      var candidatePayload = buildPayload(candidateB64, prompt, mimeType, candidateNotes);
+      var candidatePayloadStr = JSON.stringify(candidatePayload);
+      var candidateSize = estimateUtf8Bytes(candidatePayloadStr);
+
+      if (candidateSize <= RUNTIME_MESSAGE_SAFE_MAX_BYTES) {
+        currentB64 = candidateB64;
+        currentNotes = candidateNotes;
+        continue;
+      }
+
+      if (currentB64.length === 0) {
+        throw new Error('Image #' + (i + 1) + ' is too large even alone for extension messaging. Reduce image size/quality and retry.');
+      }
+
+      batches.push({ b64Array: currentB64.slice(), visionNotesArray: currentNotes.slice() });
+      currentB64 = [b64Array[i]];
+      currentNotes = [visionNotesArray && visionNotesArray[i] ? visionNotesArray[i] : []];
+    }
+
+    if (currentB64.length > 0) {
+      batches.push({ b64Array: currentB64.slice(), visionNotesArray: currentNotes.slice() });
+    }
+
+    return batches;
+  }
+
+  function estimatePayloadSizeBytes(b64Array, prompt, mimeType, visionNotesArray) {
+    var payload = buildPayload(b64Array, prompt, mimeType, visionNotesArray);
+    return estimateUtf8Bytes(JSON.stringify(payload));
+  }
+
+  function uploadImageToGeminiFile(dataUrl, apiKey, displayName) {
+    return new Promise(function(resolve, reject) {
+      chrome.runtime.sendMessage({
+        action: 'proxy_gemini_upload_file',
+        apiKey: apiKey,
+        dataUrl: dataUrl,
+        displayName: displayName
+      }, function(res) {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (!res || !res.success) {
+          reject(new Error(res && res.error ? res.error : 'Unknown upload error'));
+          return;
+        }
+
+        var data = res.data || {};
+        var fileObj = data.file || data;
+        var fileUri = fileObj.uri || fileObj.fileUri || fileObj.file_uri;
+        var fileMime = fileObj.mimeType || fileObj.mime_type || 'image/jpeg';
+        if (!fileUri) {
+          reject(new Error('Upload succeeded but no file URI was returned.'));
+          return;
+        }
+        resolve({ uri: fileUri, mimeType: fileMime });
+      });
+    });
+  }
+
+  function buildPayloadWithFileData(fileInfos, prompt, mimeType, visionNotesArray) {
+    var placeholders = [];
+    for (var i = 0; i < fileInfos.length; i++) placeholders.push('x');
+
+    var payload = buildPayload(placeholders, prompt, mimeType, visionNotesArray);
+    var fileIdx = 0;
+
+    for (var c = 0; c < payload.contents.length; c++) {
+      var content = payload.contents[c];
+      if (!content || !Array.isArray(content.parts)) continue;
+      for (var p = 0; p < content.parts.length; p++) {
+        var part = content.parts[p];
+        if (!part || !part.inline_data) continue;
+        if (fileIdx >= fileInfos.length) {
+          throw new Error('Internal mismatch while mapping uploaded files to payload parts.');
+        }
+        var info = fileInfos[fileIdx++];
+        content.parts[p] = {
+          file_data: {
+            mime_type: info.mimeType || 'image/jpeg',
+            file_uri: info.uri
+          }
+        };
+      }
+    }
+
+    if (fileIdx !== fileInfos.length) {
+      throw new Error('Internal mismatch: not all uploaded files were mapped to the payload.');
+    }
+
+    return payload;
+  }
+
+  function sendToGeminiViaFiles(endpoint, key, model, b64Array, prompt, mimeType, visionNotesArray, processedDataUrlArray, finalizeSend) {
+    var uploadedFiles = [];
+
+    function uploadNext(idx) {
+      if (cancelRequested) {
+        finalizeSend();
+        return;
+      }
+
+      if (idx >= b64Array.length) {
+        var finalPayload;
+        try {
+          finalPayload = buildPayloadWithFileData(uploadedFiles, prompt, mimeType, visionNotesArray);
+        } catch (e) {
+          elOut.textContent = 'Payload Build Error: ' + e.message;
+          finalizeSend();
+          return;
+        }
+
+        elOut.textContent = 'All files uploaded. Sending final combined request... [1/1]';
+        sendGeminiPayload(endpoint, JSON.stringify(finalPayload),
+          function(result) {
+            elOut.textContent = result.displayText;
+            finalizeSend();
+          },
+          function(errorText, rawTitle, rawValue) {
+            elOut.textContent = errorText;
+            if (rawTitle) showRawBlock(rawTitle, rawValue);
+            finalizeSend();
+          }
+        );
+        return;
+      }
+
+      var total = b64Array.length;
+      var current = idx + 1;
+      elOut.textContent = 'Payload >64 MiB. Uploading images to Gemini Files... [' + current + '/' + total + ']';
+
+      var mime = mimeType || 'image/jpeg';
+      var dataUrl = (processedDataUrlArray && processedDataUrlArray[idx])
+        ? processedDataUrlArray[idx]
+        : ('data:' + mime + ';base64,' + b64Array[idx]);
+      var displayName = 'gic-' + Date.now() + '-' + current + '.jpg';
+      uploadImageToGeminiFile(dataUrl, key, displayName)
+        .then(function(fileInfo) {
+          uploadedFiles.push(fileInfo);
+          uploadNext(idx + 1);
+        })
+        .catch(function(err) {
+          elOut.textContent = 'Files upload failed at [' + current + '/' + total + ']: ' + err.message;
+          showRawBlock('RAW ERROR:', { stage: 'files_upload', index: current, total: total, error: err.message });
+          finalizeSend();
+        });
+    }
+
+    uploadNext(0);
+  }
+
+  function sendGeminiPayload(endpoint, payloadStr, onSuccess, onFailure) {
+    var reqHandle = GM_xmlhttpRequest({
+      method: 'POST',
+      url: endpoint,
+      headers: { 'Content-Type': 'application/json' },
+      data: payloadStr,
+      onload: function(r) {
+        var result = parseGeminiResponse(r.responseText || '(empty response)');
+        if (result.ok) {
+          onSuccess(result);
+        } else {
+          onFailure(result.displayText, result.rawTitle, result.rawValue);
+        }
+      },
+      onerror: function(err) {
+        onFailure('Network error - could not reach Gemini API.', 'RAW ERROR:', err);
+      }
+    });
+    if (reqHandle) activeRequests.push(reqHandle);
+  }
+
+  function sendToGemini(b64Array, prompt, mimeType, visionNotesArray, processedDataUrlArray) {
     try {
       var key = elApiKey.value.trim() || apiKey;
       var model = elModel.value || selectedModel;
@@ -1623,69 +1881,103 @@ if (elJbSearch) {
       elOut.textContent = 'Sending to ' + model + '...';
       elRaw.style.display = 'none';
       elRaw.textContent = '';
-      
-      var payloadStr;
+
+      var batches;
+      var wouldExceedRuntimeLimit = false;
       try {
-        payloadStr = JSON.stringify(buildPayload(b64Array, prompt, mimeType, visionNotesArray));
+        var singlePayloadSize = estimatePayloadSizeBytes(b64Array, prompt, mimeType, visionNotesArray);
+        wouldExceedRuntimeLimit = singlePayloadSize > (64 * 1024 * 1024);
+        if (!wouldExceedRuntimeLimit) {
+          batches = splitPayloadIntoBatches(b64Array, prompt, mimeType, visionNotesArray);
+        } else {
+          batches = [];
+        }
       } catch (payloadError) {
         elOut.textContent = 'Payload Build Error: ' + payloadError.message;
+        elSend.disabled = false;
+        elSend.textContent = 'Send to Gemini';
+        elCancel.style.display = 'none';
         return;
       }
 
-      var reqHandle = GM_xmlhttpRequest({
-        method: 'POST',
-        url: endpoint,
-        headers: { 'Content-Type': 'application/json' },
-        data: payloadStr,
-      onload: function (r) {
-        var rawText = r.responseText || '(empty response)';
-        try {
-          var d = JSON.parse(rawText);
-          if (d.error) {
-            elOut.textContent = 'API Error (' + (d.error.code || '?') + '): ' + (d.error.message || 'Unknown error');
-            showRawBlock('RAW RESPONSE:', d);
-          } else if (d.candidates && d.candidates.length > 0) {
-            var c0 = d.candidates[0] || {};
-            var parts = (c0.content && c0.content.parts) ? c0.content.parts : [];
-            var text = '';
-            for (var i = 0; i < parts.length; i++) {
-              if (parts[i].text) text += parts[i].text;
-            }
-            if (text) {
-              elOut.textContent = text;
-              if (c0.finishReason && c0.finishReason !== 'STOP') {
-                elOut.textContent += '\n\n[Finish Reason: ' + c0.finishReason + ']';
-              }
-            } else if (c0.finishReason) {
-              elOut.textContent = 'Blocked: ' + c0.finishReason + (c0.finishMessage ? '\n' + c0.finishMessage : '');
-              showRawBlock('RAW RESPONSE:', d);
-            } else {
-              elOut.textContent = '(empty text in response)';
-              showRawBlock('RAW RESPONSE:', d);
-            }
-          } else {
-            elOut.textContent = 'Unexpected response format.';
-            showRawBlock('RAW RESPONSE:', d);
-          }
-        } catch (e) {
-          elOut.textContent = 'Parse error: ' + e.message;
-          showRawBlock('RAW RESPONSE:', rawText);
-        }
-        elSend.disabled = false;
-        elSend.textContent = 'Send to Gemini';
-        elCancel.style.display = 'none';
-      },
-      onerror: function (err) {
-        elOut.textContent = 'Network error - could not reach Gemini API.';
-        showRawBlock('RAW ERROR:', err);
+      function finalizeSend() {
+        activeRequests = [];
         elSend.disabled = false;
         elSend.textContent = 'Send to Gemini';
         elCancel.style.display = 'none';
       }
-    });
-    if (reqHandle) activeRequests.push(reqHandle);
+
+      if (wouldExceedRuntimeLimit) {
+        sendToGeminiViaFiles(endpoint, key, model, b64Array, prompt, mimeType, visionNotesArray, processedDataUrlArray, finalizeSend);
+        return;
+      }
+
+      if (!batches.length) {
+        elOut.textContent = 'No images to send.';
+        finalizeSend();
+        return;
+      }
+
+      if (batches.length === 1) {
+        elOut.textContent = 'Sending to ' + model + '... [1/1]';
+        var singlePayloadStr = JSON.stringify(buildPayload(batches[0].b64Array, prompt, mimeType, batches[0].visionNotesArray));
+        sendGeminiPayload(endpoint, singlePayloadStr,
+          function(result) {
+            elOut.textContent = result.displayText;
+            finalizeSend();
+          },
+          function(errorText, rawTitle, rawValue) {
+            elOut.textContent = errorText;
+            if (rawTitle) showRawBlock(rawTitle, rawValue);
+            finalizeSend();
+          }
+        );
+        return;
+      }
+
+      var combined = [];
+      var currentBatch = 0;
+
+      if (wouldExceedRuntimeLimit) {
+        elOut.textContent = 'Large payload detected (>64 MiB). Auto-batching enabled: 0/' + batches.length;
+      }
+
+      function sendNextBatch() {
+        if (cancelRequested) {
+          return;
+        }
+
+        if (currentBatch >= batches.length) {
+          elOut.textContent = combined.join('\n\n');
+          finalizeSend();
+          return;
+        }
+
+        var idx = currentBatch;
+        var label = '[' + (idx + 1) + '/' + batches.length + ']';
+        elOut.textContent = 'Sending to ' + model + ' in batches... ' + label + ' (completed ' + idx + '/' + batches.length + ')';
+
+        var payloadStr = JSON.stringify(buildPayload(batches[idx].b64Array, prompt, mimeType, batches[idx].visionNotesArray));
+        sendGeminiPayload(endpoint, payloadStr,
+          function(result) {
+            combined.push('--- Batch ' + (idx + 1) + ' of ' + batches.length + ' ---\n' + result.displayText);
+            currentBatch++;
+            sendNextBatch();
+          },
+          function(errorText, rawTitle, rawValue) {
+            elOut.textContent = 'Batch ' + (idx + 1) + ' failed: ' + errorText;
+            if (rawTitle) showRawBlock(rawTitle, rawValue);
+            finalizeSend();
+          }
+        );
+      }
+
+      sendNextBatch();
     } catch (e) {
       elOut.textContent = 'Error sending to Gemini: ' + e.message;
+      elSend.disabled = false;
+      elSend.textContent = 'Send to Gemini';
+      elCancel.style.display = 'none';
     }
   }
 
@@ -1709,7 +2001,7 @@ if (elJbSearch) {
   // ── Canvas Vision Processing ───────────────────────────────────────────
   function applyVisionBypasses(dataUrl, callback) {
     try {
-      if (!elJbGrid.checked && !elJbGlitch.checked) return callback(dataUrl.split(',')[1], null);
+      if (!elJbGrid.checked && !elJbGlitch.checked) return callback(dataUrl.split(',')[1], null, dataUrl);
       
       var img = new Image();
       img.crossOrigin = 'anonymous';
@@ -1769,7 +2061,7 @@ if (elJbSearch) {
 
       var transformedDataUrl = c.toDataURL('image/jpeg', 0.95);
       normalizeImageDataUrlForGemini(transformedDataUrl).then(function(preparedDataUrl) {
-        callback(preparedDataUrl.split(',')[1], collectVisionNotes());
+        callback(preparedDataUrl.split(',')[1], collectVisionNotes(), preparedDataUrl);
       });
       } catch (e) { elOut.textContent = 'Error in Vision Bypass: ' + e.message; }
     };
@@ -1779,8 +2071,8 @@ if (elJbSearch) {
 
   function applyVisionBypassesAsPromise(dataUrl) {
     return new Promise(function(resolve, reject) {
-      applyVisionBypasses(dataUrl, function(b64, notes) {
-        resolve({ b64: b64, notes: notes });
+      applyVisionBypasses(dataUrl, function(b64, notes, preparedDataUrl) {
+        resolve({ b64: b64, notes: notes, dataUrl: preparedDataUrl || dataUrl });
       });
     });
   }
@@ -1898,6 +2190,7 @@ if (elJbSearch) {
     elOut.textContent = 'Fetching image(s)...';
     elRaw.style.display = 'none';
     activeRequests = [];
+    cancelRequested = false;
 
     Promise.all(imageList.map(function(src) {
       return fetchImageAsB64(src).then(function(b64) {
@@ -1907,11 +2200,13 @@ if (elJbSearch) {
     .then(function(results) {
       var b64Array = [];
       var visionNotesArray = [];
+      var processedDataUrlArray = [];
       for (var i = 0; i < results.length; i++) {
         b64Array.push(results[i].b64);
         visionNotesArray.push(results[i].notes);
+        processedDataUrlArray.push(results[i].dataUrl);
       }
-      sendToGemini(b64Array, prompt, 'image/jpeg', visionNotesArray);
+      sendToGemini(b64Array, prompt, 'image/jpeg', visionNotesArray, processedDataUrlArray);
     })
     .catch(function(err) {
       elOut.textContent = 'Error processing images: ' + err.message;
@@ -1925,6 +2220,7 @@ if (elJbSearch) {
 
   // ── Cancel button ─────────────────────────────────────────────────────
   elCancel.addEventListener('click', function () {
+    cancelRequested = true;
     for (var i = 0; i < activeRequests.length; i++) {
       try { activeRequests[i].abort(); } catch (e) { }
     }

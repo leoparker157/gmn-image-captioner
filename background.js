@@ -109,7 +109,29 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     handleProxyGemini(request, sendResponse);
     return true;
   }
+  if (request.action === "proxy_gemini_upload_file") {
+    handleProxyGeminiUploadFile(request, sendResponse);
+    return true;
+  }
 });
+
+function dataUrlToBlob(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== 'string' || dataUrl.indexOf(',') < 0) {
+    throw new Error('Invalid data URL');
+  }
+  const parts = dataUrl.split(',');
+  const meta = parts[0] || '';
+  const b64 = parts[1] || '';
+  const mimeMatch = meta.match(/^data:([^;]+);base64$/i);
+  const mimeType = (mimeMatch && mimeMatch[1]) ? mimeMatch[1] : 'application/octet-stream';
+  const binary = atob(b64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mimeType });
+}
 
 function escapeRegex(text) {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -298,5 +320,65 @@ async function handleProxyGemini(request, sendResponse) {
     sendResponse({ success: true, data: data });
   } catch (error) {
     sendResponse({ success: false, error: error.message });
+  }
+}
+
+async function handleProxyGeminiUploadFile(request, sendResponse) {
+  try {
+    const apiKey = String(request.apiKey || '').trim();
+    const dataUrl = request.dataUrl;
+    const displayName = String(request.displayName || 'gic-image').trim();
+    if (!apiKey) {
+      sendResponse({ success: false, error: 'Missing Gemini API key' });
+      return;
+    }
+
+    const blob = dataUrlToBlob(dataUrl);
+    const startUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${encodeURIComponent(apiKey)}`;
+
+    const startResp = await fetch(startUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': String(blob.size),
+        'X-Goog-Upload-Header-Content-Type': blob.type || 'application/octet-stream'
+      },
+      body: JSON.stringify({ file: { display_name: displayName } })
+    });
+
+    if (!startResp.ok) {
+      const errText = await startResp.text();
+      sendResponse({ success: false, error: 'Failed to start upload: HTTP ' + startResp.status + ' ' + errText });
+      return;
+    }
+
+    const uploadUrl = startResp.headers.get('X-Goog-Upload-URL') || startResp.headers.get('x-goog-upload-url');
+    if (!uploadUrl) {
+      sendResponse({ success: false, error: 'Upload URL missing from Gemini upload start response' });
+      return;
+    }
+
+    const finalizeResp = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'X-Goog-Upload-Offset': '0',
+        'X-Goog-Upload-Command': 'upload, finalize',
+        'Content-Type': blob.type || 'application/octet-stream'
+      },
+      body: blob
+    });
+
+    if (!finalizeResp.ok) {
+      const errText = await finalizeResp.text();
+      sendResponse({ success: false, error: 'Failed to upload/finalize file: HTTP ' + finalizeResp.status + ' ' + errText });
+      return;
+    }
+
+    const data = await finalizeResp.json();
+    sendResponse({ success: true, data: data });
+  } catch (error) {
+    sendResponse({ success: false, error: error.message || String(error) });
   }
 }
